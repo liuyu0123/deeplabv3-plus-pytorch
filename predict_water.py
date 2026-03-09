@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from deeplab import DeeplabV3
+from deeplab_water import DeeplabV3
 
 if __name__ == "__main__":
     #-------------------------------------------------------------------------#
@@ -31,8 +31,9 @@ if __name__ == "__main__":
     #   count、name_classes仅在mode='predict'时有效
     #-------------------------------------------------------------------------#
     count           = False
-    name_classes    = ["background","aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair", "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
+    # name_classes    = ["background","aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair", "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
     # name_classes    = ["background","cat","dog"]
+    name_classes    = ["background", "water"]  # <-- 修改：水域分割类别
     #----------------------------------------------------------------------------------------------------------#
     #   video_path          用于指定视频的路径，当video_path=0时表示检测摄像头
     #                       想要检测视频，则设置如video_path = "xxx.mp4"即可，代表读取出根目录下的xxx.mp4文件。
@@ -154,10 +155,12 @@ if __name__ == "__main__":
             if img_name.lower().endswith(('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
                 image_path  = os.path.join(dir_origin_path, img_name)
                 image       = Image.open(image_path)
-                r_image     = deeplab.detect_image(image)
+                # r_image     = deeplab.detect_image(image)
+                r_image = deeplab.detect_image(image, blend=False)  # <-- 修改：支持blend参数，默认不混合
                 if not os.path.exists(dir_save_path):
                     os.makedirs(dir_save_path)
                 r_image.save(os.path.join(dir_save_path, img_name))
+                
     elif mode == "export_onnx":
         deeplab.convert_to_onnx(simplify, onnx_save_path)
         
