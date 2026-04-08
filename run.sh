@@ -42,7 +42,7 @@ python train_water_val_pro.py `
     --masks D:\Files\Data\IRWSB\train\masks_pspnet `
     --val-images D:\Files\Data\IRWSB\val\images `
     --val-masks D:\Files\Data\IRWSB\val\masks_pspnet `
-    --epochs 10 `
+    --epochs 150 `
     --batch-size 4 `
     --learning-rate 1e-2 `
     --model-dir checkpoints/exp_pspnet_01 `
@@ -91,3 +91,13 @@ python test_water.py `
 python predict.py
 #测试模型（水域分割）
 python predict_water.py
+
+#测试模型pro（水域分割，pro升级版，保存红色mask蒙版结果与csv评价指标）
+python predict_water_best_pro.py `
+    --input "D:\Files\Data\IRWSB\analyse\images" `
+    --weights "F:\AAA\4_deeplabv3plus_best\experiment1\experiment1_last.pth" `
+    --output "D:\Files\GitProject\deeplabv3-plus-pytorch-LY\results_deeplab" `
+    --ground_truth "D:\Files\Data\IRWSB\analyse\masks_pspnet" `
+    --alpha 0.5 `
+    --backbone mobilenet `
+    --max_side 1024
