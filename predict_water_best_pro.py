@@ -10,6 +10,7 @@ from PIL import Image
 import csv
 from glob import glob
 import copy
+import time
 
 # DeepLabV3+ 模型导入
 from nets.deeplabv3_plus import DeepLab
@@ -53,36 +54,49 @@ def compute_metrics(pred_mask, gt_mask):
     }
 
 def print_metrics_table(metrics_list):
-    print("\n" + "="*80)
+    print("\n" + "="*110)
     print("DeepLabV3+ 分割性能评估结果")
-    print("-"*80)
-    print(f"{'文件名':<30} {'Precision':<10} {'Recall':<10} {'F1-Score':<10} {'mIoU':<10}")
-    print("-"*80)
+    print("-"*110)
+    print(f"{'文件名':<30} {'Precision':<10} {'Recall':<10} {'F1-Score':<10} {'mIoU':<10} "
+          f"{'Time(ms)':<12} {'FPS':<10}")
+    print("-"*110)
     for m in metrics_list:
         print(f"{m['image']:<30} {m['precision']:<10.4f} {m['recall']:<10.4f} "
-              f"{m['f1']:<10.4f} {m['miou']:<10.4f}")
+              f"{m['f1']:<10.4f} {m['miou']:<10.4f} {m['inference_time']*1000:<12.2f} {m['fps']:<10.2f}")
     avg_p = np.mean([m['precision'] for m in metrics_list])
     avg_r = np.mean([m['recall'] for m in metrics_list])
     avg_f1 = np.mean([m['f1'] for m in metrics_list])
     avg_iou = np.mean([m['miou'] for m in metrics_list])
-    print("-"*80)
-    print(f"{'[整体平均]':<30} {avg_p:<10.4f} {avg_r:<10.4f} {avg_f1:<10.4f} {avg_iou:<10.4f}")
-    print("="*80)
+    avg_time = np.mean([m['inference_time'] for m in metrics_list])
+    avg_fps = np.mean([m['fps'] for m in metrics_list])
+    print("-"*110)
+    print(f"{'[整体平均]':<30} {avg_p:<10.4f} {avg_r:<10.4f} {avg_f1:<10.4f} {avg_iou:<10.4f} "
+          f"{avg_time*1000:<12.2f} {avg_fps:<10.2f}")
+    print("="*110)
 
 def save_csv(metrics_list, save_path):
     if not metrics_list:
         return
     avg_metrics = {
         'image': 'AVERAGE',
-        'precision': np.mean([m['precision'] for m in metrics_list]),
-        'recall': np.mean([m['recall'] for m in metrics_list]),
-        'f1': np.mean([m['f1'] for m in metrics_list]),
-        'miou': np.mean([m['miou'] for m in metrics_list])
+        'precision': float(np.mean([m['precision'] for m in metrics_list])),
+        'recall': float(np.mean([m['recall'] for m in metrics_list])),
+        'f1': float(np.mean([m['f1'] for m in metrics_list])),
+        'miou': float(np.mean([m['miou'] for m in metrics_list])),
+        'inference_time': float(np.mean([m['inference_time'] for m in metrics_list])),
+        'fps': float(np.mean([m['fps'] for m in metrics_list]))
     }
+    # 保留原始列名，添加新列
+    rows_out = []
+    for m in metrics_list:
+        row = dict(m)
+        rows_out.append(row)
+    rows_out.append(avg_metrics)
+
     with open(save_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['image', 'precision', 'recall', 'f1', 'miou'])
+        writer = csv.DictWriter(f, fieldnames=['image', 'precision', 'recall', 'f1', 'miou', 'inference_time', 'fps'])
         writer.writeheader()
-        writer.writerows(metrics_list + [avg_metrics])
+        writer.writerows(rows_out)
     print(f"\n✓ 指标已保存至: {save_path}")
 
 def save_overlay_result(pil_img, pred_mask, save_path, alpha=0.4):
@@ -154,6 +168,49 @@ def main():
     print(f"✓ 权重加载成功: {args.weights}")
     print(f"  设备: {device} | 主干网络: {args.backbone} | 下采样: {args.downsample_factor}\n")
 
+    # Warm-up：用第一张图片的实际输入尺寸做 warm-up，避免分辨率变化导致的重新分配
+    if input_paths:
+        first_img = Image.open(input_paths[0])
+        first_img = cvtColor(first_img)
+        fh = np.array(first_img).shape[0]
+        fw = np.array(first_img).shape[1]
+        scale = min(args.max_side / max(fw, fh), 1.0)
+        nw = int(fw * scale)
+        nh = int(fh * scale)
+        nw = max(32, (nw // 32) * 32)
+        nh = max(32, (nh // 32) * 32)
+        print("正在进行 warm-up 推理...")
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, nh, nw).to(device)
+            _ = net(dummy)
+        if use_cuda:
+            torch.cuda.synchronize()
+        print("✓ warm-up 完成\n")
+
+    # 再用第一张图片做一次不计时的完整前向，覆盖 cuDNN autotune 等残余开销
+    if input_paths:
+        try:
+            w_img = Image.open(input_paths[0])
+            w_img = cvtColor(w_img)
+            wh = np.array(w_img).shape[0]
+            ww = np.array(w_img).shape[1]
+            scale = min(args.max_side / max(ww, wh), 1.0)
+            nw = int(ww * scale)
+            nh = int(wh * scale)
+            nw = max(32, (nw // 32) * 32)
+            nh = max(32, (nh // 32) * 32)
+            image_data, nw_real, nh_real = resize_image(w_img, (nw, nh))
+            image_data = np.expand_dims(
+                np.transpose(preprocess_input(np.array(image_data, np.float32)), (2, 0, 1)), 0
+            )
+            with torch.no_grad():
+                w_tensor = torch.from_numpy(image_data).to(device)
+                _ = net(w_tensor)[0]
+            if use_cuda:
+                torch.cuda.synchronize()
+        except Exception:
+            pass
+
     metrics_list = []
 
     for img_path in input_paths:
@@ -186,18 +243,25 @@ def main():
             # 4. 推理
             with torch.no_grad():
                 images = torch.from_numpy(image_data).to(device)
-                pr = net(images)[0] 
-                
+                if use_cuda:
+                    torch.cuda.synchronize()
+                start_time = time.perf_counter()
+                pr = net(images)[0]
+                if use_cuda:
+                    torch.cuda.synchronize()
+                end_time = time.perf_counter()
+                inference_time = end_time - start_time
+
                 pr = F.softmax(pr.permute(1, 2, 0), dim=-1).cpu().numpy()
-                
+
                 # 裁切灰条（与原始逻辑保持一致）
-                pr = pr[int((nh - nh_real) // 2) : int((nh - nh_real) // 2 + nh_real), 
+                pr = pr[int((nh - nh_real) // 2) : int((nh - nh_real) // 2 + nh_real),
                        int((nw - nw_real) // 2) : int((nw - nw_real) // 2 + nw_real)]
-                
+
                 # Resize 回原图尺寸
                 pr = cv2.resize(pr, (orininal_w, orininal_h), interpolation=cv2.INTER_LINEAR)
                 pr = pr.argmax(axis=-1)
-                
+
         except Exception as e:
             print(f"跳过 {img_name}: {e}")
             continue
@@ -229,8 +293,11 @@ def main():
                     
                     metrics = compute_metrics(pr, gt_mask)
                     metrics['image'] = img_name
+                    metrics['inference_time'] = inference_time
+                    metrics['fps'] = 1.0 / inference_time if inference_time > 0 else 0.0
                     metrics_list.append(metrics)
-                    print(f"  处理: {img_name} | Precision: {metrics['precision']:.4f} | mIoU: {metrics['miou']:.4f}")
+                    print(f"  处理: {img_name} | Precision: {metrics['precision']:.4f} | mIoU: {metrics['miou']:.4f} | "
+                          f"Time: {metrics['inference_time']*1000:.2f}ms | FPS: {metrics['fps']:.2f}")
                 except Exception as e:
                     print(f"  警告: 真值处理失败 {img_name}: {e}")
             else:
